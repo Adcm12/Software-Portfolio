@@ -1,53 +1,35 @@
 package com.portfolio.oee;
 
+import java.sql.*;
+import java.util.Vector;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
-
-/**
- * Handles all SQLite database operations for the OEE Tracker.
- * Initializes local storage and provides methods for CRUD operations.
- */
 public class DatabaseManager {
 
     private static final String URL = "jdbc:sqlite:oee_data.db";
 
-    /**
-     * Establishes a connection to the SQLite database.
-     * Creates the database file if it does not exist.
-     */
     public static Connection connect() {
-
         Connection conn = null;
         try {
-        	Class.forName("org.sqlite.JDBC");
+            Class.forName("org.sqlite.JDBC");
             conn = DriverManager.getConnection(URL);
         } catch (SQLException | ClassNotFoundException e) {
-            System.out.println("Connection error: " + e.getMessage());
+            System.out.println("Error de conexión: " + e.getMessage());
         }
         return conn;
     }
 
-    /**
-     * Initializes the database schema.
-     */
     public static void initializeDatabase() {
         String createProductionTable = "CREATE TABLE IF NOT EXISTS production ("
                 + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                + "date TEXT DEFAULT CURRENT_DATE,"
-                + "planned_time_mins REAL,"
-                + "ideal_cycle_time_mins REAL,"
-                + "total_produced INTEGER,"
-                + "defects INTEGER"
+                + "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,"
+                + "logs_produced REAL,"
+                + "defects REAL,"
+                + "operating_time_mins REAL"
                 + ");";
 
         String createDowntimeTable = "CREATE TABLE IF NOT EXISTS downtime ("
                 + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                + "date TEXT DEFAULT CURRENT_DATE,"
+                + "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,"
                 + "reason TEXT,"
                 + "duration_mins REAL"
                 + ");";
@@ -57,26 +39,23 @@ public class DatabaseManager {
             stmt.execute(createProductionTable);
             stmt.execute(createDowntimeTable);
         } catch (SQLException e) {
-            System.out.println("Initialization error: " + e.getMessage());
+            System.out.println("Error de inicialización: " + e.getMessage());
         }
     }
 
-    // Insert new production log
-    public static void insertProduction(double plannedTime, double idealCycle, int total, int defects) {
-        String sql = "INSERT INTO production(planned_time_mins, ideal_cycle_time_mins, total_produced, defects) VALUES(?,?,?,?)";
+    public static void insertProduction(double logs, double defects, double timeMins) {
+        String sql = "INSERT INTO production(logs_produced, defects, operating_time_mins) VALUES(?,?,?)";
         try (Connection conn = connect();
              PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setDouble(1, plannedTime);
-            pstmt.setDouble(2, idealCycle);
-            pstmt.setInt(3, total);
-            pstmt.setInt(4, defects);
+            pstmt.setDouble(1, logs);
+            pstmt.setDouble(2, defects);
+            pstmt.setDouble(3, timeMins);
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println("Insert error: " + e.getMessage());
+            System.out.println("Error al insertar producción: " + e.getMessage());
         }
     }
 
-    // Insert new downtime log
     public static void insertDowntime(String reason, double duration) {
         String sql = "INSERT INTO downtime(reason, duration_mins) VALUES(?,?)";
         try (Connection conn = connect();
@@ -85,44 +64,66 @@ public class DatabaseManager {
             pstmt.setDouble(2, duration);
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println("Downtime insert error: " + e.getMessage());
+            System.out.println("Error al insertar parada: " + e.getMessage());
         }
     }
 
-    // Aggregate total downtime for today
-    public static double getTodayTotalDowntime() {
-        String sql = "SELECT SUM(duration_mins) as total_down FROM downtime WHERE date = CURRENT_DATE";
+    public static double[] getTodayAverages() {
+        double avail = 1.0, perf = 0.0, qual = 1.0, oee = 0.0;
+        // Obtenemos sumatoria de producción de hoy
+        String sqlData = "SELECT SUM(logs_produced) as t_logs, SUM(defects) as t_def, SUM(operating_time_mins) as t_op " +
+                         "FROM production WHERE date(timestamp) = date('now')";
+        // Obtenemos sumatoria de paradas de hoy
+        String sqlDown = "SELECT SUM(duration_mins) as t_down FROM downtime WHERE date(timestamp) = date('now')";
+
         try (Connection conn = connect();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            if (rs.next()) {
-                return rs.getDouble("total_down");
+             Statement stmt = conn.createStatement()) {
+            
+            ResultSet rsProd = stmt.executeQuery(sqlData);
+            if (rsProd.next()) {
+                double totalLogs = rsProd.getDouble("t_logs");
+                double totalDefects = rsProd.getDouble("t_def");
+                double totalOpTime = rsProd.getDouble("t_op");
+                
+                if (totalLogs > 0) qual = (totalLogs - totalDefects) / totalLogs;
+                
+                // Meta: 7 logs por minuto. Performance = logs reales / (tiempo operado * 7)
+                double logsEsperados = totalOpTime * 7.0;
+                if (logsEsperados > 0) perf = Math.min(1.0, totalLogs / logsEsperados);
             }
+
+            ResultSet rsDown = stmt.executeQuery(sqlDown);
+            double totalDown = rsDown.next() ? rsDown.getDouble("t_down") : 0;
+            
+            // Disponibilidad basada en un turno de 8 horas (480 min)
+            double tiempoTurno = 480.0;
+            avail = Math.max(0, (tiempoTurno - totalDown) / tiempoTurno);
+            
+            oee = avail * perf * qual;
+
         } catch (SQLException e) {
-            System.out.println("Query error: " + e.getMessage());
+            System.out.println("Error en cálculos: " + e.getMessage());
         }
-        return 0;
+        return new double[]{avail, perf, qual, oee};
     }
 
-    // Get today's latest production metrics for calculation
-    public static double[] getTodayProductionMetrics() {
-        String sql = "SELECT SUM(planned_time_mins) as pt, AVG(ideal_cycle_time_mins) as ict, "
-                   + "SUM(total_produced) as tp, SUM(defects) as def "
-                   + "FROM production WHERE date = CURRENT_DATE";
+    public static Vector<Vector<Object>> getTodayDowntimeList() {
+        Vector<Vector<Object>> data = new Vector<>();
+        String sql = "SELECT strftime('%H:%M:%S', timestamp) as hora, reason, duration_mins FROM downtime " +
+                     "WHERE date(timestamp) = date('now') AND duration_mins > 0 ORDER BY timestamp DESC";
         try (Connection conn = connect();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
-            if (rs.next()) {
-                return new double[]{
-                    rs.getDouble("pt"),
-                    rs.getDouble("ict"),
-                    rs.getDouble("tp"),
-                    rs.getDouble("def")
-                };
+            while (rs.next()) {
+                Vector<Object> row = new Vector<>();
+                row.add(rs.getString("hora"));
+                row.add(rs.getString("reason"));
+                row.add(rs.getDouble("duration_mins") + " min");
+                data.add(row);
             }
         } catch (SQLException e) {
-            System.out.println("Query error: " + e.getMessage());
+            System.out.println("Error tabla paradas: " + e.getMessage());
         }
-        return new double[]{0, 0, 0, 0};
+        return data;
     }
 }
