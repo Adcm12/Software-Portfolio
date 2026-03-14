@@ -9,5 +9,6 @@
 	<classpathentry kind="lib" path="C:/Users/adria/Downloads/jsoup-1.22.1.jar"/>
 	<classpathentry kind="lib" path="C:/Users/adria/OneDrive/Desktop/sqlite-jdbc-3.45.1.0.jar"/>
 	<classpathentry kind="lib" path="C:/Users/adria/OneDrive/Desktop/slf4j-api-1.7.36.jar"/>
+	<classpathentry kind="lib" path="C:/Users/adria/OneDrive/Desktop/itextpdf-5.5.13.3.jar"/>
 	<classpathentry kind="output" path="bin"/>
 </classpath>
